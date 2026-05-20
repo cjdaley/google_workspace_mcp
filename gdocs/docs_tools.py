@@ -55,6 +55,7 @@ from gdocs.docs_markdown import (
 from gdocs.docs_markdown_writer import markdown_to_docs_requests
 from gdocs.operation_schemas import BatchDocOperations
 
+from gdocs.docs_guardrails import validate_create_doc_input, validate_modify_doc_text_input, validate_find_replace_input
 # Import operation managers for complex business logic
 from gdocs.managers import (
     TableOperationManager,
@@ -374,6 +375,8 @@ async def create_doc(
     """
     logger.info(f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}'")
 
+
+    validate_create_doc_input(title, content)
     doc = await asyncio.to_thread(
         service.documents().create(body={"title": title}).execute
     )
@@ -470,6 +473,8 @@ async def modify_doc_text(
     """
     logger.info(
         f"[modify_doc_text] Doc={document_id}, start={start_index}, end={end_index}, text={text is not None}, "
+
+    validate_modify_doc_text_input(document_id, start_index, end_index, text)
         f"formatting={any(p is not None for p in [bold, italic, underline, strikethrough, font_size, font_family, font_weight, text_color, background_color, link_url, clear_link, baseline_offset, small_caps])}"
     )
 
@@ -714,6 +719,8 @@ async def find_and_replace_doc(
     """
     logger.info(
         f"[find_and_replace_doc] Doc={document_id}, find='{find_text}', replace='{replace_text}', tab='{tab_id}'"
+
+    validate_find_replace_input(document_id, find_text, replace_text)
     )
 
     requests = [
