@@ -55,7 +55,14 @@ from gdocs.docs_markdown import (
 from gdocs.docs_markdown_writer import markdown_to_docs_requests
 from gdocs.operation_schemas import BatchDocOperations
 
-from gdocs.docs_guardrails import validate_create_doc_input, validate_modify_doc_text_input, validate_find_replace_input
+from gdocs.docs_guardrails import (
+    validate_create_doc_input,
+    validate_modify_doc_text_input,
+    validate_find_replace_input,
+    load_quota_state_from_kt,
+    check_docs_quota,
+    validate_write_and_update_quota,
+)
 # Import operation managers for complex business logic
 from gdocs.managers import (
     TableOperationManager,
@@ -375,12 +382,29 @@ async def create_doc(
     """
     logger.info(f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}'")
 
+    # GUARDRAIL 1: Input validation (title length, content size)
+    validation_result = validate_create_doc_input(user_google_email, title, content)
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
 
-    validate_create_doc_input(title, content)
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 83%, block at 97%)
+    quota_check = check_docs_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
+
+    # Create the document
     doc = await asyncio.to_thread(
         service.documents().create(body={"title": title}).execute
     )
     doc_id = doc.get("documentId")
+
+    # Insert initial content if provided
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
         await asyncio.to_thread(
@@ -388,6 +412,16 @@ async def create_doc(
             .batchUpdate(documentId=doc_id, body={"requests": requests})
             .execute
         )
+
+    # GUARDRAIL 4: Update quota after successful operation
+    write_result = f"Successfully created document '{title}'"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        operation_type="create_doc",
+        quota_state=quota_state,
+        user_google_email=user_google_email
+    )
+
     link = f"https://docs.google.com/document/d/{doc_id}/edit"
     if content:
         content_note = f"Initial content: {len(content)} characters inserted."
@@ -399,6 +433,8 @@ async def create_doc(
         f"Use batch_update_doc with end_of_segment=true to append content. "
         f"Link: {link}"
     )
+    if quota_update.get("metadata"):
+        msg += f"\n[Quota] Remaining this minute: {quota_update['metadata'].get('quota_remaining', 'N/A')}/300"
     logger.info(
         f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}"
     )
@@ -475,7 +511,21 @@ async def modify_doc_text(
         f"[modify_doc_text] Doc={document_id}, start={start_index}, end={end_index}, text={text is not None}, formatting={any(p is not None for p in [bold, italic, underline, strikethrough, font_size, font_family, font_weight, text_color, background_color, link_url, clear_link, baseline_offset, small_caps])}"
     )
 
-    validate_modify_doc_text_input(document_id, start_index, end_index, text)
+    # GUARDRAIL 1: Input validation
+    validation_result = validate_modify_doc_text_input(user_google_email, document_id, text, start_index, end_index)
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 83%, block at 97%)
+    quota_check = check_docs_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
 
     # Input validation
     validator = ValidationManager()
@@ -675,10 +725,22 @@ async def modify_doc_text(
     except HttpError as error:
         raise _rewrite_modify_doc_text_http_error(error, segment_id) from error
 
+    # GUARDRAIL 4: Update quota after successful operation
+    write_result = f"Successfully modified text in document {document_id}"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        operation_type="modify_doc_text",
+        quota_state=quota_state,
+        user_google_email=user_google_email
+    )
+
     link = f"https://docs.google.com/document/d/{document_id}/edit"
     operation_summary = "; ".join(operations)
     text_info = f" Text length: {len(text)} characters." if text else ""
-    return f"{operation_summary} in document {document_id}.{text_info} Link: {link}"
+    msg = f"{operation_summary} in document {document_id}.{text_info} Link: {link}"
+    if quota_update.get("metadata"):
+        msg += f"\n[Quota] Remaining this minute: {quota_update['metadata'].get('quota_remaining', 'N/A')}/300"
+    return msg
 
 
 @server.tool()
@@ -720,7 +782,21 @@ async def find_and_replace_doc(
         f"[find_and_replace_doc] Doc={document_id}, find='{find_text}', replace='{replace_text}', tab='{tab_id}'"
     )
 
-    validate_find_replace_input(document_id, find_text, replace_text)
+    # GUARDRAIL 1: Input validation
+    validation_result = validate_find_replace_input(user_google_email, document_id, find_text, replace_text)
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 83%, block at 97%)
+    quota_check = check_docs_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
 
     requests = [
         create_find_replace_request(find_text, replace_text, match_case, tab_id)
@@ -739,8 +815,20 @@ async def find_and_replace_doc(
         if "replaceAllText" in reply:
             replacements = reply["replaceAllText"].get("occurrencesChanged", 0)
 
+    # GUARDRAIL 4: Update quota after successful operation
+    write_result = f"Successfully replaced {replacements} occurrence(s) in document {document_id}"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        operation_type="find_and_replace_doc",
+        quota_state=quota_state,
+        user_google_email=user_google_email
+    )
+
     link = f"https://docs.google.com/document/d/{document_id}/edit"
-    return f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
+    msg = f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
+    if quota_update.get("metadata"):
+        msg += f"\n[Quota] Remaining this minute: {quota_update['metadata'].get('quota_remaining', 'N/A')}/300"
+    return msg
 
 
 @server.tool()
