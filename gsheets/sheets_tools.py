@@ -33,6 +33,12 @@ from gsheets.sheets_helpers import (
     _select_sheet,
     _values_contain_sheets_errors,
 )
+from gsheets.sheets_guardrails import (
+    validate_append_input,
+    load_quota_state_from_kt,
+    check_quota_limits,
+    validate_write_and_update_quota,
+)
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -1330,6 +1336,8 @@ async def append_table_rows(
     Appends rows to a structured table in a Google Sheet. The rows are added
     to the end of the table body, automatically extending the table range.
 
+    Includes guardrails for input validation, quota tracking, and partial-write detection.
+
     Use list_sheet_tables first to find the table ID.
 
     Args:
@@ -1347,15 +1355,29 @@ async def append_table_rows(
         f"Spreadsheet: {spreadsheet_id}, Table: {table_id}"
     )
 
-    # Parse values if JSON string
-    if isinstance(values, str):
-        try:
-            values = json.loads(values)
-        except json.JSONDecodeError as e:
-            raise UserInputError(f"Invalid JSON in values parameter: {e}")
+    # GUARDRAIL 1: Input validation (row count, size limits, JSON parsing)
+    validation_result = validate_append_input(
+        values=values,
+        user_google_email=user_google_email,
+        spreadsheet_id=spreadsheet_id,
+        table_id=table_id
+    )
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
 
-    if not values or not isinstance(values, list):
-        raise UserInputError("values must be a non-empty 2D list of cell values.")
+    validated_values = validation_result["rows"]
+    num_rows = validation_result["row_count"]
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 90%, block at 100%)
+    quota_check = check_quota_limits(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
 
     # Resolve the sheet ID for the table before building the request
     spreadsheet = await asyncio.to_thread(
@@ -1384,12 +1406,7 @@ async def append_table_rows(
 
     # Build cell data for appendCells
     rows = []
-    for row_values in values:
-        if not isinstance(row_values, list):
-            raise UserInputError(
-                "Each row in values must be a list. "
-                'Expected format: [["val1", "val2"], ["val3", "val4"]]'
-            )
+    for row_values in validated_values:
         cells = []
         for val in row_values:
             cells.append({"userEnteredValue": _to_extended_value(val)})
@@ -1408,19 +1425,48 @@ async def append_table_rows(
         ]
     }
 
-    await asyncio.to_thread(
+    # API call - capture response for validation
+    api_response = await asyncio.to_thread(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
         .execute
     )
 
-    num_rows = len(values)
-    text_output = (
-        f"Successfully appended {num_rows} row(s) to table '{table_id}' "
-        f"in spreadsheet {spreadsheet_id} for {user_google_email}."
+    # GUARDRAIL 4: Validate write and update quota (CRITICAL: detects partial writes)
+    rows_written = num_rows  # Default assumption
+    if api_response and "replies" in api_response and api_response["replies"]:
+        reply = api_response["replies"][0]
+        if "appendCells" in reply:
+            rows_written = reply["appendCells"].get("responses", [{}])[0].get("updatedRows", num_rows)
+
+    write_result = f"Successfully appended {rows_written} row(s)... (Requested: {num_rows}, Actual: {rows_written})"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        rows_submitted=num_rows,
+        quota_state=quota_state,
+        user_google_email=user_google_email
     )
 
-    logger.info(f"[append_table_rows] Appended {num_rows} rows for {user_google_email}")
+    if quota_update.get("status") == "partial_write_detected":
+        # CRITICAL: Partial write detected - block and alert
+        logger.error(f"CRITICAL: {quota_update['error']}")
+        raise UserInputError(
+            f"Partial write detected: {rows_written}/{num_rows} rows written. "
+            f"Data integrity issue. Contact support."
+        )
+
+    if "error" in quota_update:
+        logger.error(f"Quota update failed: {quota_update['error']}")
+        raise UserInputError(quota_update['error'])
+
+    text_output = (
+        f"Successfully appended {rows_written} row(s) to table '{table_id}' "
+        f"in spreadsheet {spreadsheet_id} for {user_google_email}. "
+        f"Quota impact: {quota_update.get('quota_impact', 0)} API calls. "
+        f"Drive quota: {quota_update.get('metadata', {}).get('drive_quota_remaining', 'N/A')} remaining."
+    )
+
+    logger.info(f"[append_table_rows] Appended {rows_written} rows for {user_google_email}")
     return text_output
 
 
