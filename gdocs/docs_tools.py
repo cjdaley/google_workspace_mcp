@@ -472,11 +472,10 @@ async def modify_doc_text(
         str: Confirmation message with operation details
     """
     logger.info(
-        f"[modify_doc_text] Doc={document_id}, start={start_index}, end={end_index}, text={text is not None}, "
+        f"[modify_doc_text] Doc={document_id}, start={start_index}, end={end_index}, text={text is not None}, formatting={any(p is not None for p in [bold, italic, underline, strikethrough, font_size, font_family, font_weight, text_color, background_color, link_url, clear_link, baseline_offset, small_caps])}"
+    )
 
     validate_modify_doc_text_input(document_id, start_index, end_index, text)
-        f"formatting={any(p is not None for p in [bold, italic, underline, strikethrough, font_size, font_family, font_weight, text_color, background_color, link_url, clear_link, baseline_offset, small_caps])}"
-    )
 
     # Input validation
     validator = ValidationManager()
@@ -719,9 +718,9 @@ async def find_and_replace_doc(
     """
     logger.info(
         f"[find_and_replace_doc] Doc={document_id}, find='{find_text}', replace='{replace_text}', tab='{tab_id}'"
+    )
 
     validate_find_replace_input(document_id, find_text, replace_text)
-    )
 
     requests = [
         create_find_replace_request(find_text, replace_text, match_case, tab_id)
