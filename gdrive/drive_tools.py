@@ -25,6 +25,7 @@ from auth.oauth_config import is_stateless_mode
 from core.attachment_storage import get_attachment_storage, get_attachment_url
 from core.utils import (
     IMAGE_MIME_TYPES,
+    UserInputError,
     encode_image_content,
     extract_office_xml_text,
     extract_pdf_text,
@@ -680,6 +681,8 @@ async def create_drive_folder(
     """
     Creates a new folder in Google Drive, supporting creation within shared drives.
 
+    Includes guardrails for input validation and quota tracking.
+
     Args:
         user_google_email (str): The user's Google email address. Required.
         folder_name (str): The name for the new folder.
@@ -692,9 +695,42 @@ async def create_drive_folder(
     logger.info(
         f"[create_drive_folder] Invoked. Email: '{user_google_email}', Folder: '{folder_name}', Parent: '{parent_folder_id}'"
     )
-    return await _create_drive_folder_impl(
+
+    # GUARDRAIL 1: Input validation (folder name length, reserved names)
+    validation_result = validate_create_folder_input(user_google_email, folder_name, parent_folder_id)
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 90%, block at 100%)
+    quota_check = check_drive_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
+
+    # Create the folder
+    result = await _create_drive_folder_impl(
         service, user_google_email, folder_name, parent_folder_id
     )
+
+    # GUARDRAIL 4: Update quota after successful operation
+    write_result = f"Successfully created folder '{folder_name}'"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        operation_type="create_drive_folder",
+        quota_state=quota_state,
+        user_google_email=user_google_email
+    )
+
+    # Add quota info to result message
+    if quota_update.get("metadata"):
+        result += f"\n[Quota] Remaining today: {quota_update['metadata'].get('quota_remaining', 'N/A')}/1000"
+
+    return result
 
 
 @server.tool()
@@ -736,6 +772,25 @@ async def create_drive_file(
         return await _create_drive_folder_impl(
             service, user_google_email, file_name, folder_id
         )
+
+    # GUARDRAIL 1: Validate upload input (filename length, content size if available)
+    file_size_estimate = 0
+    if content:
+        file_size_estimate = len(content.encode('utf-8'))
+    validation_result = validate_upload_input(user_google_email, file_name, file_size_estimate)
+    if "error" in validation_result:
+        raise UserInputError(validation_result["error"])
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 90%, block at 100%)
+    quota_check = check_drive_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
 
     file_data = None
     resolved_folder_id = await resolve_folder_id(service, folder_id)
@@ -925,6 +980,20 @@ async def create_drive_file(
     link = created_file.get("webViewLink", "No link available")
     confirmation_message = f"Successfully created file '{created_file.get('name', file_name)}' (ID: {created_file.get('id', 'N/A')}) in folder '{folder_id}' for {user_google_email}. Link: {link}"
     logger.info(f"Successfully created file. Link: {link}")
+
+    # GUARDRAIL 4: Update quota after successful operation
+    write_result = f"Successfully created file '{file_name}'"
+    quota_update = validate_write_and_update_quota(
+        write_result=write_result,
+        operation_type="create_drive_file",
+        quota_state=quota_state,
+        user_google_email=user_google_email
+    )
+
+    # Add quota info to confirmation message
+    if quota_update.get("metadata"):
+        confirmation_message += f"\n[Quota] Remaining today: {quota_update['metadata'].get('quota_remaining', 'N/A')}/1000"
+
     return confirmation_message
 
 
@@ -1711,6 +1780,32 @@ async def manage_drive_access(
         f"[manage_drive_access] Invoked. Email: '{user_google_email}', "
         f"File ID: '{file_id}', Action: '{action}'"
     )
+
+    # GUARDRAIL 1: Validate permission change (for grant actions)
+    if action in ("grant", "update"):
+        validation_result = validate_permission_change_input(
+            user_google_email,
+            file_id,
+            share_type if action == "grant" else "user",
+            role if action == "grant" else (role or "reader")
+        )
+        if "error" in validation_result:
+            raise UserInputError(validation_result["error"])
+        # Warn if risky sharing pattern
+        if validation_result.get("warnings"):
+            for warning in validation_result["warnings"]:
+                logger.warning(warning)
+
+    # GUARDRAIL 2: Load quota state from Knowledge Table
+    quota_state = load_quota_state_from_kt(user_google_email)
+
+    # GUARDRAIL 3: Check quota limits (warn at 90%, block at 100%)
+    quota_check = check_drive_quota(quota_state)
+    if "error" in quota_check:
+        raise UserInputError(quota_check["error"])
+    if quota_check.get("warnings"):
+        for warning in quota_check["warnings"]:
+            logger.warning(warning)
 
     # --- grant: share with a single recipient ---
     if action == "grant":
