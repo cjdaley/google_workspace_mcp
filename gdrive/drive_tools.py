@@ -10,7 +10,7 @@ import logging
 import io
 import base64
 
-from typing import Optional, List, Dict, Any, Callable, Awaitable, BinaryIO
+from typing import Optional, List, Dict, Any, Callable, Awaitable, BinaryIO, TypedDict
 from tempfile import NamedTemporaryFile, SpooledTemporaryFile
 from urllib.parse import urlparse
 from urllib.request import url2pathname
@@ -67,6 +67,23 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_CHUNK_SIZE_BYTES = 256 * 1024  # 256 KB
 UPLOAD_CHUNK_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB (Google recommended minimum)
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB safety limit for URL downloads
+
+
+class Recipient(TypedDict, total=False):
+    """Recipient object for grant_batch action.
+
+    Fields:
+        email: Email address of user/group
+        domain: Domain name (for domain shares)
+        role: Permission role (reader, commenter, writer)
+        share_type: Type of sharing (user, group, domain, anyone)
+        expiration_time: Expiration in RFC 3339 format
+    """
+    email: Optional[str]
+    domain: Optional[str]
+    role: Optional[str]
+    share_type: Optional[str]
+    expiration_time: Optional[str]
 
 
 async def _stream_url_with_validation(
@@ -267,7 +284,7 @@ async def get_drive_file_content(
     • Any other file → downloaded; tries UTF-8 decode, else notes binary.
 
     Args:
-        user_google_email: The user’s Google email address.
+        user_google_email: The user's Google email address.
         file_id: Drive file ID.
 
     Returns:
@@ -1719,7 +1736,7 @@ async def manage_drive_access(
     role: Optional[str] = None,
     share_type: str = "user",
     permission_id: Optional[str] = None,
-    recipients: Optional[List[Dict[str, Any]]] = None,
+    recipients: Optional[List[Recipient]] = None,
     send_notification: bool = True,
     email_message: Optional[str] = None,
     expiration_time: Optional[str] = None,
@@ -1750,7 +1767,7 @@ async def manage_drive_access(
             Used by "grant". Defaults to 'user'.
         permission_id (Optional[str]): The permission ID to modify or remove.
             Required for "update" and "revoke" actions.
-        recipients (Optional[List[Dict[str, Any]]]): List of recipient objects for
+        recipients (Optional[List[Recipient]]): List of recipient objects for
             "grant_batch". Each should have: email (str), role (str, optional),
             share_type (str, optional), expiration_time (str, optional). For domain
             shares use 'domain' field instead of 'email'.
