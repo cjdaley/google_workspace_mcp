@@ -10,7 +10,8 @@ import logging
 import io
 import base64
 
-from typing import Optional, List, Dict, Any, Callable, Awaitable, BinaryIO, TypedDict
+from typing import Optional, List, Dict, Any, Callable, Awaitable, BinaryIO
+from typing_extensions import TypedDict
 from tempfile import NamedTemporaryFile, SpooledTemporaryFile
 from urllib.parse import urlparse
 from urllib.request import url2pathname
