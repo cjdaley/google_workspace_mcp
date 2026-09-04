@@ -11,6 +11,8 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import Scope, Receive, Send
 from starlette.requests import Request
 from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+import secrets
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
@@ -89,8 +91,23 @@ class SecureFastMCP(FastMCP):
         """Override to add secure middleware stack for OAuth 2.1."""
         app = super().http_app(**kwargs)
 
-        # Add middleware in order (first added = outermost layer)
-        app.user_middleware.insert(0, well_known_cache_control_middleware)
+        mcp_token = os.environ.get("DRIVE_MCP_TOKEN")
+        if not mcp_token:
+            raise RuntimeError("DRIVE_MCP_TOKEN environment variable is required")
+
+        class BearerTokenMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                if request.method == "GET" and request.url.path in ("/", "/health", "/oauth2callback"):
+                    return await call_next(request)
+                auth = request.headers.get("authorization", "")
+                provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+                if not provided or not secrets.compare_digest(provided, mcp_token):
+                    return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return await call_next(request)
+
+        app.user_middleware.insert(0, Middleware(BearerTokenMiddleware))
+        app.user_middleware.insert(1, well_known_cache_control_middleware)
+        app.user_middleware.insert(2, session_middleware)
 
         # Session Management - extracts session info for MCP context
         app.user_middleware.insert(1, session_middleware)
